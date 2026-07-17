@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -13,6 +14,7 @@ export type PublicUser = {
   id: string;
   email: string;
   name: string | null;
+  role: Role;
   createdAt: Date;
 };
 
@@ -35,6 +37,22 @@ function safeEqualHex(a: string, b: string): boolean {
   return aBuf.length === bBuf.length && timingSafeEqual(aBuf, bBuf);
 }
 
+function toPublic(user: {
+  id: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  createdAt: Date;
+}): PublicUser {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    createdAt: user.createdAt,
+  };
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -50,11 +68,11 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(password, PASSWORD_ROUNDS);
     const user = await this.prisma.user.create({
       data: { email, password: passwordHash, name: name ?? null },
-      select: { id: true, email: true, name: true, createdAt: true },
+      select: { id: true, email: true, name: true, role: true, createdAt: true },
     });
 
-    const tokens = await this.issueTokens(user.id, user.email);
-    return { user, tokens };
+    const tokens = await this.issueTokens(user);
+    return { user: toPublic(user), tokens };
   }
 
   async login(email: string, password: string): Promise<AuthResult> {
@@ -64,33 +82,13 @@ export class AuthService {
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) throw new UnauthorizedException('invalid credentials');
 
-    const tokens = await this.issueTokens(user.id, user.email);
-    const publicUser: PublicUser = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      createdAt: user.createdAt,
-    };
-    return { user: publicUser, tokens };
-  }
-
-  async refresh(userId: string, presentedRefreshToken: string): Promise<TokenPair> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !user.hashedRefreshToken) throw new UnauthorizedException('refresh denied');
-
-    const presentedHash = hashRefreshToken(presentedRefreshToken);
-    if (!safeEqualHex(presentedHash, user.hashedRefreshToken)) {
-      throw new UnauthorizedException('refresh denied');
-    }
-
-    return this.issueTokens(user.id, user.email);
+    const tokens = await this.issueTokens(user);
+    return { user: toPublic(user), tokens };
   }
 
   async oauthLoginWithGoogle(profile: GoogleProfile): Promise<AuthResult> {
-    // 1. Try to find an existing user linked to this Google account.
     let user = await this.prisma.user.findUnique({ where: { googleId: profile.googleId } });
 
-    // 2. Otherwise, look up by email — link the Google account to the existing user.
     if (!user) {
       const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
       if (byEmail) {
@@ -104,7 +102,6 @@ export class AuthService {
       }
     }
 
-    // 3. Otherwise, create a brand new user (no local password).
     if (!user) {
       user = await this.prisma.user.create({
         data: {
@@ -115,14 +112,20 @@ export class AuthService {
       });
     }
 
-    const tokens = await this.issueTokens(user.id, user.email);
-    const publicUser: PublicUser = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      createdAt: user.createdAt,
-    };
-    return { user: publicUser, tokens };
+    const tokens = await this.issueTokens(user);
+    return { user: toPublic(user), tokens };
+  }
+
+  async refresh(userId: string, presentedRefreshToken: string): Promise<TokenPair> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.hashedRefreshToken) throw new UnauthorizedException('refresh denied');
+
+    const presentedHash = hashRefreshToken(presentedRefreshToken);
+    if (!safeEqualHex(presentedHash, user.hashedRefreshToken)) {
+      throw new UnauthorizedException('refresh denied');
+    }
+
+    return this.issueTokens(user);
   }
 
   async logout(userId: string): Promise<void> {
@@ -135,14 +138,22 @@ export class AuthService {
   async me(userId: string): Promise<PublicUser> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, email: true, name: true, createdAt: true },
+      select: { id: true, email: true, name: true, role: true, createdAt: true },
     });
     if (!user) throw new UnauthorizedException('user not found');
-    return user;
+    return toPublic(user);
   }
 
-  private async issueTokens(userId: string, email: string): Promise<TokenPair> {
-    const payload: JwtPayload = { sub: userId, email };
+  async adminStats(): Promise<{ userCount: number; adminCount: number }> {
+    const [userCount, adminCount] = await Promise.all([
+      this.prisma.user.count(),
+      this.prisma.user.count({ where: { role: Role.ADMIN } }),
+    ]);
+    return { userCount, adminCount };
+  }
+
+  private async issueTokens(user: { id: string; email: string; role: Role }): Promise<TokenPair> {
+    const payload: JwtPayload = { sub: user.id, email: user.email, role: user.role };
     const accessToken = this.jwt.sign(payload, {
       secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
       expiresIn: this.config.get<string>('JWT_ACCESS_EXPIRES_IN', '15m'),
@@ -152,7 +163,7 @@ export class AuthService {
       expiresIn: this.config.get<string>('JWT_REFRESH_EXPIRES_IN', '7d'),
     });
     await this.prisma.user.update({
-      where: { id: userId },
+      where: { id: user.id },
       data: { hashedRefreshToken: hashRefreshToken(refreshToken) },
     });
     return { accessToken, refreshToken };

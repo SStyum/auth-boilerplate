@@ -1,19 +1,19 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Role } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import { clearRefreshCookie, setRefreshCookie } from './cookies';
+import { CurrentUser } from './decorators/current-user.decorator';
 import { Public } from './decorators/public.decorator';
+import { Roles } from './decorators/roles.decorator';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
 import type { GoogleProfile } from './strategies/google.strategy';
+import type { RefreshUser } from './strategies/jwt-refresh.strategy';
 
-type RequestWithUser = Request & { user: { userId: string; email: string } };
-type RequestWithRefresh = Request & {
-  user: { userId: string; email: string; refreshToken: string };
-};
 type RequestWithGoogleProfile = Request & { user: GoogleProfile };
 
 @Controller('auth')
@@ -44,22 +44,28 @@ export class AuthController {
   @UseGuards(JwtRefreshGuard)
   @Post('refresh')
   @HttpCode(200)
-  async refresh(@Req() req: RequestWithRefresh, @Res({ passthrough: true }) res: Response) {
-    const tokens = await this.auth.refresh(req.user.userId, req.user.refreshToken);
+  async refresh(@CurrentUser() user: RefreshUser, @Res({ passthrough: true }) res: Response) {
+    const tokens = await this.auth.refresh(user.userId, user.refreshToken);
     setRefreshCookie(res, this.config, tokens.refreshToken);
     return { accessToken: tokens.accessToken };
   }
 
   @Post('logout')
   @HttpCode(204)
-  async logout(@Req() req: RequestWithUser, @Res({ passthrough: true }) res: Response) {
-    await this.auth.logout(req.user.userId);
+  async logout(@CurrentUser('userId') userId: string, @Res({ passthrough: true }) res: Response) {
+    await this.auth.logout(userId);
     clearRefreshCookie(res, this.config);
   }
 
   @Get('me')
-  me(@Req() req: RequestWithUser) {
-    return this.auth.me(req.user.userId);
+  me(@CurrentUser('userId') userId: string) {
+    return this.auth.me(userId);
+  }
+
+  @Roles(Role.ADMIN)
+  @Get('admin/stats')
+  adminStats() {
+    return this.auth.adminStats();
   }
 
   // Kicks off the Google OAuth redirect flow. The guard bounces the client

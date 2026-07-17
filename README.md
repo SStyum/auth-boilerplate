@@ -8,7 +8,7 @@ Pronto para ser clonado e adaptado em novos projetos.
 - [x] Registro e login com e-mail/senha
 - [x] JWT + Refresh Token em httpOnly cookie
 - [x] OAuth com Google
-- [ ] Guards e Decorators customizados
+- [x] Guards e Decorators customizados
 - [ ] Rotas protegidas no frontend
 
 ## Stack
@@ -40,6 +40,7 @@ com `Path=/auth`, `SameSite=Lax` em dev e `SameSite=None; Secure` em prod (via `
 | POST   | `/auth/refresh`         | cookie `refresh…` | —                            | `200 { accessToken }`                 | `401` cookie ausente/inválido/rotacionado     |
 | POST   | `/auth/logout`          | Bearer            | —                            | `204` + cookie limpo                  | `401` sem access token                        |
 | GET    | `/auth/me`              | Bearer            | —                            | `200 PublicUser`                      | `401` sem access token                        |
+| GET    | `/auth/admin/stats`     | Bearer + ADMIN    | —                            | `200 { userCount, adminCount }`       | `401` sem token · `403` role errada           |
 | GET    | `/auth/google`          | público           | —                            | `302` para accounts.google.com        | `501` se OAuth não configurado                |
 | GET    | `/auth/google/callback` | público           | `?code=…`                    | `302 OAUTH_SUCCESS_REDIRECT` + cookie | `501` / `401`                                 |
 
@@ -128,3 +129,77 @@ O fluxo:
 **Contas linkadas**: se um usuário já tem conta com email/senha e depois faz login com
 Google usando o mesmo e-mail, o `googleId` é adicionado ao registro existente — não é
 criada uma segunda conta.
+
+## Decorators disponíveis
+
+Todos em [apps/api/src/auth/decorators/](apps/api/src/auth/decorators/).
+
+### `@Public()`
+
+Libera uma rota da autenticação (bypassa o `JwtAuthGuard` global).
+
+```ts
+import { Public } from './auth/decorators/public.decorator';
+
+@Public()
+@Get('health')
+health() {
+  return { status: 'ok' };
+}
+```
+
+### `@CurrentUser()`
+
+Injeta o usuário autenticado (o que o `JwtStrategy.validate` retornou) no handler.
+Aceita um key opcional pra pegar só um campo:
+
+```ts
+import { CurrentUser } from './auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from './auth/strategies/jwt.strategy';
+
+@Get('me')
+me(@CurrentUser() user: AuthenticatedUser) {
+  return this.svc.findById(user.userId);
+}
+
+// versão com key: só o userId, tipado como string
+@Get('logs')
+myLogs(@CurrentUser('userId') userId: string) {
+  return this.svc.logsFor(userId);
+}
+```
+
+### `@Roles(...roles)` + `RolesGuard`
+
+Restringe a rota a roles específicas. O `RolesGuard` está registrado como `APP_GUARD` — ele
+roda depois do `JwtAuthGuard`, então `req.user.role` já está populado (vem do payload JWT).
+
+```ts
+import { Role } from '@prisma/client';
+import { Roles } from './auth/decorators/roles.decorator';
+
+@Roles(Role.ADMIN)
+@Get('admin/stats')
+stats() {
+  return this.svc.stats();
+}
+
+// múltiplas roles
+@Roles(Role.ADMIN, Role.EDITOR)
+@Post('publish')
+publish() { ... }
+```
+
+Sem `@Roles`, o guard libera (fica no-op). Com `@Roles(Role.ADMIN)` e usuário
+`USER`, retorna `403 requires role: ADMIN`.
+
+**Como promover um usuário a ADMIN em dev**:
+
+```bash
+docker exec authbp-postgres psql -U authbp -d authbp \
+  -c "UPDATE \"User\" SET role='ADMIN' WHERE email='seu@email.com';"
+```
+
+O usuário precisa **relogar** pra que o JWT tenha o role novo (roles são embutidas no
+access token). Em prod, considere um endpoint `POST /auth/admin/promote` protegido por
+admin existente.
