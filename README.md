@@ -1,7 +1,13 @@
 # Auth Boilerplate
 
+[![Use this template](https://img.shields.io/badge/GitHub-Use%20this%20template-2ea44f?logo=github)](https://github.com/SStyum/auth-boilerplate/generate)
+[![Tests](https://img.shields.io/badge/tests-16%2F16%20passing-brightgreen)](apps/api/test/auth.e2e-spec.ts)
+[![Stack](https://img.shields.io/badge/stack-NestJS%20%2B%20React-blue)](#stack)
+
 Autenticação completa: JWT, Refresh Token e OAuth com Google.
 Pronto para ser clonado e adaptado em novos projetos.
+
+> **Demo**: _adicione o link aqui depois de fazer o deploy_
 
 ## Funcionalidades
 
@@ -10,6 +16,8 @@ Pronto para ser clonado e adaptado em novos projetos.
 - [x] OAuth com Google
 - [x] Guards e Decorators customizados
 - [x] Rotas protegidas no frontend
+- [x] 16 testes e2e cobrindo os fluxos de auth
+- [x] Dockerfile de produção para API e Web
 
 ## Stack
 
@@ -284,3 +292,89 @@ docker exec authbp-postgres psql -U authbp -d authbp \
 
 Faça logout + login → HomePage mostra a seção de admin. Para OAuth, configure
 `GOOGLE_CLIENT_ID`/`SECRET` no `.env` e reinicie a API.
+
+## Testes
+
+Suite de 16 testes e2e em [apps/api/test/auth.e2e-spec.ts](apps/api/test/auth.e2e-spec.ts)
+usando `@nestjs/testing` + supertest. Roda contra o Postgres real (por `DATABASE_URL`)
+e usa `e2e@authbp.local` como usuário-fantoche que é criado/derrubado em `beforeEach`
+— não bagunça outros usuários no banco.
+
+```bash
+cd apps/api && pnpm test:e2e
+```
+
+Cobertura:
+
+| Grupo            | Casos                                                                                                                         |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| public endpoints | `/health` 200 · `/auth/google` 501 quando não configurado                                                                     |
+| register         | 201 + cookie · 409 dup · 400 senha curta · 400 email inválido                                                                 |
+| login            | 200 com credenciais corretas · 401 senha errada · 401 email inexistente com **mesma mensagem** (anti-enumeração)              |
+| /auth/me         | 401 sem token · 200 com Bearer                                                                                                |
+| refresh + logout | 401 sem cookie · **rotação** (cookie antigo rejeitado, novo funciona) · logout 204 + Set-Cookie limpo + hash nulificado no DB |
+| roles guard      | USER → 403 em `/auth/admin/stats` · após promoção via DB + relogin → 200                                                      |
+
+Detalhe do teste de rotação: os JWTs são idênticos se assinados no mesmo segundo (payload+secret+iat),
+então o teste espera 1.1s antes de rotacionar. O restante da suite roda em ~3.3s.
+
+## Deploy
+
+Dockerfiles de produção incluídos em `apps/api/Dockerfile` (multi-stage: deps → build →
+runtime não-root com `prisma migrate deploy` no start) e `apps/web/Dockerfile` (build via
+Vite + servido por nginx com fallback SPA).
+
+### Railway (API + Postgres)
+
+1. `railway login` (ou pelo dashboard)
+2. `railway init` no root do repo
+3. Adicione o plugin Postgres — vincule ao serviço da API pra Railway injetar `DATABASE_URL`
+4. Configure as variáveis do serviço da API:
+   - `JWT_ACCESS_SECRET` — gere com `openssl rand -hex 32`
+   - `JWT_ACCESS_EXPIRES_IN=15m`
+   - `JWT_REFRESH_SECRET` — outro valor aleatório, diferente do access
+   - `JWT_REFRESH_EXPIRES_IN=7d`
+   - `COOKIE_DOMAIN` — o domínio público (ex: `.seuapp.com` pra funcionar cross-subdomain com o web)
+   - `COOKIE_SECURE=true` — HTTPS de produção; habilita `SameSite=None`
+   - `WEB_ORIGIN` — URL exata do web (`https://seuapp.com`)
+   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL=https://api.seuapp.com/auth/google/callback`
+   - `OAUTH_SUCCESS_REDIRECT=https://seuapp.com`
+   - `NODE_ENV=production`
+5. Railway detecta o Dockerfile em `apps/api/`. Se preferir Nixpacks, use os comandos:
+   - Build: `pnpm install && pnpm --filter @authbp/api exec prisma generate && pnpm --filter @authbp/api build`
+   - Start: `cd apps/api && npx prisma migrate deploy && node dist/main.js`
+6. `railway up`
+
+### Web (Vercel ou Railway static)
+
+1. Build: `pnpm --filter @authbp/web build` (ou usa o Dockerfile de `apps/web/`)
+2. Output: `apps/web/dist`
+3. Variável no build: `VITE_API_URL=https://api.seuapp.com`
+4. Rewrite/proxy SPA: qualquer rota → `index.html` (o `nginx.conf` do Dockerfile já faz isso)
+
+### Checklist pré-deploy
+
+- [ ] `JWT_ACCESS_SECRET` e `JWT_REFRESH_SECRET` aleatórios, **diferentes um do outro**
+- [ ] `COOKIE_SECURE=true` em prod (habilita `SameSite=None` — obrigatório se o web e a API
+      estão em domínios diferentes)
+- [ ] `COOKIE_DOMAIN` cobrindo tanto o web quanto a API (ex: `.seuapp.com`)
+- [ ] `WEB_ORIGIN` batendo com a URL de prod do web (senão CORS bloqueia)
+- [ ] Google OAuth: **Authorized redirect URI** do Google Cloud Console = valor exato de
+      `GOOGLE_CALLBACK_URL`
+- [ ] `pnpm test:e2e` verde antes do deploy
+- [ ] Nenhum secret no repo (`.env` está no `.gitignore`)
+
+## Como reutilizar
+
+Este projeto foi feito pra ser clonado como boilerplate:
+
+1. Click em [**Use this template**](https://github.com/SStyum/auth-boilerplate/generate)
+   no GitHub (se ainda não estiver habilitado, marque em Settings → Template repository)
+2. `pnpm install && cp .env.example .env`
+3. Ajuste `apps/api/prisma/schema.prisma` com seus modelos (mantendo `User` e `Role`)
+4. `pnpm --filter @authbp/api exec prisma migrate dev --name init`
+5. Adicione suas rotas dentro de novos módulos — elas já ficam protegidas pelo
+   `JwtAuthGuard` global. Use `@Public()` pra liberar, `@CurrentUser()` pra pegar o
+   usuário, `@Roles(Role.ADMIN)` pra restringir
+
+O padrão de decorators + guards globais está pronto pra você não pensar em auth de novo.
