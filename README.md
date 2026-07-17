@@ -9,7 +9,7 @@ Pronto para ser clonado e adaptado em novos projetos.
 - [x] JWT + Refresh Token em httpOnly cookie
 - [x] OAuth com Google
 - [x] Guards e Decorators customizados
-- [ ] Rotas protegidas no frontend
+- [x] Rotas protegidas no frontend
 
 ## Stack
 
@@ -203,3 +203,84 @@ docker exec authbp-postgres psql -U authbp -d authbp \
 O usuário precisa **relogar** pra que o JWT tenha o role novo (roles são embutidas no
 access token). Em prod, considere um endpoint `POST /auth/admin/promote` protegido por
 admin existente.
+
+## Frontend
+
+SPA em React + Vite com [react-router-dom](https://reactrouter.com), formulários com
+[React Hook Form](https://react-hook-form.com) + [Zod](https://zod.dev), HTTP via
+[axios](https://axios-http.com) com `withCredentials: true` pro cookie de refresh viajar.
+
+**Estrutura**:
+
+```
+apps/web/src/
+├── App.tsx                       # BrowserRouter + rotas
+├── context/AuthContext.tsx       # useAuth() — user, accessToken, login/register/logout
+├── lib/api.ts                    # axios com interceptors (attach Bearer, silent refresh)
+├── lib/schemas.ts                # Zod: loginSchema, registerSchema
+├── components/
+│   ├── ProtectedRoute.tsx        # redireciona pra /login se anônimo
+│   └── GoogleButton.tsx          # <a> pra API_URL/auth/google
+└── pages/
+    ├── LoginPage.tsx             # RHF + Zod
+    ├── RegisterPage.tsx          # RHF + Zod
+    └── HomePage.tsx              # user info, logout, stats se ADMIN
+```
+
+**Fluxo de sessão**:
+
+```
+    ┌─────────────┐                              ┌──────────┐
+    │  Browser    │                              │   API    │
+    └──────┬──────┘                              └────┬─────┘
+           │  1. AuthProvider monta                   │
+           │  2. POST /auth/refresh (silent)          │
+           │─────────────────────────────────────────▶│
+           │                                          │
+           │  ─── se cookie ausente: 401 ────         │
+           │  loading=false, user=null → /login       │
+           │                                          │
+           │  ─── se cookie válido: 200 + accessToken │
+           │  GET /auth/me → user hidrata → HomePage  │
+           │                                          │
+           │  --- durante uso -----                   │
+           │  qualquer request 401 →                  │
+           │  interceptor tenta /auth/refresh 1x      │
+           │  (coalesced: só uma refresh em voo)      │
+           │  → retry original com novo token         │
+           │  → se refresh falhar: logout local       │
+```
+
+**Refresh silencioso**: no `AuthProvider.useEffect` do mount, chama `/auth/refresh`
+uma vez pra hidratar sessão vinda de OAuth ou de aba anterior. Se o cookie estiver
+válido, o usuário aparece já logado. Se não, cai na tela de login sem flash.
+
+**Interceptor de refresh** (`context/AuthContext.tsx`): quando um request 401 chega
+(access token expirou), o interceptor tenta `/auth/refresh`, atualiza o accessToken
+via `setAccessToken`, e refaz o request original com o novo Bearer. Requisições
+paralelas dividem a mesma promise de refresh via `refreshFlight` — evita corrida onde
+5 requests simultâneos disparariam 5 refresh calls e rotacionariam o token 5 vezes.
+
+**OAuth do frontend**: `GoogleButton` é só `<a href="${API_URL}/auth/google">`. O
+browser navega pra API, que 302 pra Google, Google autentica e devolve pra
+`/auth/google/callback`, API seta o cookie e 302 pra `OAUTH_SUCCESS_REDIRECT` (o
+`/` da SPA). No mount da SPA o silent refresh pega o cookie e hidrata.
+
+**Como testar em 2 minutos**:
+
+```bash
+docker compose up -d
+cd apps/api && pnpm dev            # em uma aba
+cd apps/web && pnpm dev            # em outra aba
+```
+
+Abra http://localhost:5173. Registre com qualquer e-mail/senha (>= 8 chars). Depois,
+pra ver a seção "Admin stats":
+
+```bash
+docker exec authbp-postgres psql -U authbp -d authbp \
+  -c "UPDATE \"User\" SET role='ADMIN' WHERE email='seu@email.com';"
+```
+
+Faça logout + login → HomePage mostra a seção de admin. Para OAuth, configure
+`GOOGLE_CLIENT_ID`/`SECRET` no `.env` e reinicie a API.
