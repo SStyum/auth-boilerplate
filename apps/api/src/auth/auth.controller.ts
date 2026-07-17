@@ -6,12 +6,15 @@ import { clearRefreshCookie, setRefreshCookie } from './cookies';
 import { Public } from './decorators/public.decorator';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
+import type { GoogleProfile } from './strategies/google.strategy';
 
 type RequestWithUser = Request & { user: { userId: string; email: string } };
 type RequestWithRefresh = Request & {
   user: { userId: string; email: string; refreshToken: string };
 };
+type RequestWithGoogleProfile = Request & { user: GoogleProfile };
 
 @Controller('auth')
 export class AuthController {
@@ -57,5 +60,22 @@ export class AuthController {
   @Get('me')
   me(@Req() req: RequestWithUser) {
     return this.auth.me(req.user.userId);
+  }
+
+  // Kicks off the Google OAuth redirect flow. The guard bounces the client
+  // to accounts.google.com; this handler body never actually runs.
+  @Public()
+  @UseGuards(GoogleAuthGuard)
+  @Get('google')
+  googleAuth(): void {}
+
+  @Public()
+  @UseGuards(GoogleAuthGuard)
+  @Get('google/callback')
+  async googleCallback(@Req() req: RequestWithGoogleProfile, @Res() res: Response) {
+    const { tokens } = await this.auth.oauthLoginWithGoogle(req.user);
+    setRefreshCookie(res, this.config, tokens.refreshToken);
+    const target = this.config.get<string>('OAUTH_SUCCESS_REDIRECT', 'http://localhost:5173');
+    res.redirect(target);
   }
 }

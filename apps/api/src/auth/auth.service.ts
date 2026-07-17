@@ -4,6 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import type { GoogleProfile } from './strategies/google.strategy';
 import type { JwtPayload } from './strategies/jwt.strategy';
 
 const PASSWORD_ROUNDS = 10;
@@ -83,6 +84,45 @@ export class AuthService {
     }
 
     return this.issueTokens(user.id, user.email);
+  }
+
+  async oauthLoginWithGoogle(profile: GoogleProfile): Promise<AuthResult> {
+    // 1. Try to find an existing user linked to this Google account.
+    let user = await this.prisma.user.findUnique({ where: { googleId: profile.googleId } });
+
+    // 2. Otherwise, look up by email — link the Google account to the existing user.
+    if (!user) {
+      const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
+      if (byEmail) {
+        user = await this.prisma.user.update({
+          where: { id: byEmail.id },
+          data: {
+            googleId: profile.googleId,
+            name: byEmail.name ?? profile.name,
+          },
+        });
+      }
+    }
+
+    // 3. Otherwise, create a brand new user (no local password).
+    if (!user) {
+      user = await this.prisma.user.create({
+        data: {
+          email: profile.email,
+          name: profile.name,
+          googleId: profile.googleId,
+        },
+      });
+    }
+
+    const tokens = await this.issueTokens(user.id, user.email);
+    const publicUser: PublicUser = {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      createdAt: user.createdAt,
+    };
+    return { user: publicUser, tokens };
   }
 
   async logout(userId: string): Promise<void> {
