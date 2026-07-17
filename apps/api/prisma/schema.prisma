@@ -8,12 +8,14 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
+  id                  String   @id @default(cuid())
+  email               String   @unique
   // Nullable so users created via OAuth don't need a local password
-  password  String?
-  name      String?
-  googleId  String?  @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  password            String?
+  name                String?
+  googleId            String?  @unique
+  // bcrypt hash of the currently-valid refresh token; null when logged out
+  hashedRefreshToken  String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }
